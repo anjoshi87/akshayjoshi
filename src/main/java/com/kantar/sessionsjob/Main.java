@@ -47,45 +47,36 @@ public class Main {
      * @throws IOException
      */
     public static void processSession(String[] args) throws IOException {
-        try {
-            String inputFilename = args[0];//input-statements-file.psv
-            String outputFilename = args[1];//actual-sessions.psv
-            List<Session> dataList = Collections.synchronizedList(new ArrayList<>()); // Thread-safe list
-            boolean inputDataCollected = true;
-            try (BufferedReader reader = new BufferedReader(new FileReader(inputFilename))) {
-                logger.info("Reading input File & Collecting Data...");
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    final String currentLine = line; // Effectively final for lambda
-                    // Simulate parsing and processing a line
-                    String[] tokens = currentLine.split("\\|"); // Assuming pipe-separated values
-                    Session session = new Session();
-                    session.setHomeNo(tokens[0]);
-                    session.setChannel(tokens[1]);
-                    session.setStartTime(tokens[2]);
-                    session.setActivity(tokens[3]);
-                    dataList.add(session);
-                }
-                logger.info("Input File Data Collected.");
-            } catch (IOException e) {
-                inputDataCollected = false;
+
+        String inputFilename = args[0];//input-statements-file.psv
+        String outputFilename = args[1];//actual-sessions.psv
+        List<Session> dataList = Collections.synchronizedList(new ArrayList<>()); // Thread-safe list
+        boolean inputDataCollected = true;
+        try (BufferedReader reader = new BufferedReader(new FileReader(inputFilename))) {
+            logger.info("Reading input File & Collecting Data...");
+            String line;
+            while ((line = reader.readLine()) != null) {
+                final String currentLine = line; // Effectively final for lambda
+                // Simulate parsing and processing a line
+                String[] tokens = currentLine.split("\\|"); // Assuming pipe-separated values
+                Session session = new Session();
+                session.setHomeNo(tokens[0]);
+                session.setChannel(tokens[1]);
+                session.setStartTime(tokens[2]);
+                session.setActivity(tokens[3]);
+                dataList.add(session);
             }
-
-            if (inputDataCollected) {
-
-
-                logger.info("Session Processing Started.");
-                processRecords(dataList, outputFilename);
-                //Just for output file validation purpose added below lines. So no exception handling added here
-                logger.info("Output psv file generated at:" + outputFilename + " & File Content as below:");
-                Files.lines(Paths.get(outputFilename)).forEach(s -> System.out.println(s));
-                logger.info("Session Processing Completed.");
-            }
-
+            logger.info("Input File Data Collected.");
         } catch (Exception e) {
-            logger.error("Error reading & processing input file: ", e);
+            logger.error("Exception while reading input file, so further processing failed.");
+            throw e;
         }
-
+        logger.info("Session Processing Started.");
+        processRecords(dataList, outputFilename);
+        //Just for output file validation purpose added below lines. So no exception handling added here
+        logger.info("Output psv file generated at:" + outputFilename + " & File Content as below:");
+        Files.lines(Paths.get(outputFilename)).forEach(s -> System.out.println(s));
+        logger.info("Session Processing Completed.");
     }
 
     /**
@@ -95,14 +86,15 @@ public class Main {
      * @param outputFilename
      */
     private static void processRecords(List<Session> dataList, String outputFilename) {
-        BlockingQueue<String> queue = new LinkedBlockingQueue<>();
-        //Sort on homeNo & StartTime
-        Comparator<Session> multiFieldComparator = Comparator.comparing(Session::getHomeNo)
-                .thenComparing(Session::getStartTime);
-        dataList.sort(multiFieldComparator);
-        Map<String, List<Session>> mapOfHomeNoAndSession = dataList.stream()
-                .collect(Collectors.groupingBy(Session::getHomeNo, LinkedHashMap::new, Collectors.toList()));
         try {
+            BlockingQueue<String> queue = new LinkedBlockingQueue<>();
+            //Sort on homeNo & StartTime
+            Comparator<Session> multiFieldComparator = Comparator.comparing(Session::getHomeNo)
+                    .thenComparing(Session::getStartTime);
+            dataList.sort(multiFieldComparator);
+            Map<String, List<Session>> mapOfHomeNoAndSession = dataList.stream()
+                    .collect(Collectors.groupingBy(Session::getHomeNo, LinkedHashMap::new, Collectors.toList()));
+
             ExecutorService readerPool = Executors.newFixedThreadPool(mapOfHomeNoAndSession.size());
             AtomicInteger counter = new AtomicInteger(0);
             // Submit reader tasks
@@ -153,7 +145,7 @@ public class Main {
                 throw new RuntimeException(e);
             }
         } catch (Exception e) {
-            logger.error("Exception occurred while processing & populaating output psv file.", e);
+            logger.error("Exception occurred while processing input file & populating output psv file.", e);
         }
     }
 
