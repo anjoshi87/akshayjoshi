@@ -1,5 +1,8 @@
 package com.kantar.sessionsjob;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -9,17 +12,22 @@ import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 public class Main {
 
     // See README.txt for usage example
+    private final static String header = "HomeNo|Channel|Starttime|Activity|EndTime|Duration";
+    private final static DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
+
+    private static final Logger logger = LogManager.getLogger(Main.class);
 
     public static void main(String[] args) {
 
         if (args.length < 2) {
-            System.err.println("Missing arguments: <input-statements-file> <output-sessions-file>");
+            logger.error("Missing arguments: <input-statements-file> <output-sessions-file>");
             System.exit(1);
         }
 
@@ -34,78 +42,72 @@ public class Main {
 
     /**
      * Process input Sessions file &  generate expected output sessions file
+     *
      * @param args
      * @throws IOException
      */
     public static void processSession(String[] args) throws IOException {
-        String inputFilename = args[0];//input-statements-file.psv
-        String outputFilename = args[1];//actual-sessions.psv
-        int numberOfThreads = Runtime.getRuntime().availableProcessors(); // Use available CPU cores
-        List<Session> dataList = Collections.synchronizedList(new ArrayList<>()); // Thread-safe list
-        Map<String, List<Session>> mapOfHomeNoAndSession = new HashMap<>();
-        ExecutorService executor = Executors.newFixedThreadPool(numberOfThreads);
-        boolean isProceedForFileGeneratiom = true;
-        try (BufferedReader reader = new BufferedReader(new FileReader(inputFilename))) {
-            String line;
-            String headerLine = reader.readLine();
-            while ((line = reader.readLine()) != null) {
-                final String currentLine = line; // Effectively final for lambda
-                executor.submit(() -> {
-                    try {
-                        // Simulate parsing and processing a line
-                        String[] tokens = currentLine.split("\\|"); // Assuming comma-separated values
-                        Session session = new Session();
-                        session.setHomeNo(tokens[0]);
-                        session.setChannel(tokens[1]);
-                        session.setStartTime(tokens[2]);
-                        session.setActivity(tokens[3]);
-                        dataList.add(session);
-                    } catch (Exception e) {
-                        System.err.println("Error parsing line: " + currentLine + " - " + e.getMessage());
-                    }
-                });
+        try {
+            String inputFilename = args[0];//input-statements-file.psv
+            String outputFilename = args[1];//actual-sessions.psv
+            List<Session> dataList = Collections.synchronizedList(new ArrayList<>()); // Thread-safe list
+            boolean inputDataCollected = true;
+            try (BufferedReader reader = new BufferedReader(new FileReader(inputFilename))) {
+                logger.info("Reading input File & Collecting Data...");
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    final String currentLine = line; // Effectively final for lambda
+                    // Simulate parsing and processing a line
+                    String[] tokens = currentLine.split("\\|"); // Assuming pipe-separated values
+                    Session session = new Session();
+                    session.setHomeNo(tokens[0]);
+                    session.setChannel(tokens[1]);
+                    session.setStartTime(tokens[2]);
+                    session.setActivity(tokens[3]);
+                    dataList.add(session);
+                }
+                logger.info("Input File Data Collected.");
+            } catch (IOException e) {
+                inputDataCollected = false;
             }
-        } catch (IOException e) {
-            System.err.println("Error reading file: " + e.getMessage());
-        } finally {
-            executor.shutdown();
-            try {
-                executor.awaitTermination(5, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                isProceedForFileGeneratiom = false;
-                throw new RuntimeException(e);
+
+            if (inputDataCollected) {
+
+
+                logger.info("Session Processing Started.");
+                processRecords(dataList, outputFilename);
+                //Just for output file validation purpose added below lines. So no exception handling added here
+                logger.info("Output psv file generated at:" + outputFilename + " & File Content as below:");
+                Files.lines(Paths.get(outputFilename)).forEach(s -> System.out.println(s));
+                logger.info("Session Processing Completed.");
             }
+
+        } catch (Exception e) {
+            logger.error("Error reading & processing input file: ", e);
         }
 
-        if(isProceedForFileGeneratiom) {
-            //Sort on homeNo & StartTime
-            Comparator<Session> multiFieldComparator = Comparator.comparing(Session::getHomeNo)
-                    .thenComparing(Comparator.comparing(Session::getStartTime));
-            dataList.sort(multiFieldComparator);
-            mapOfHomeNoAndSession = dataList.stream()
-                    .collect(Collectors.groupingBy(Session::getHomeNo, LinkedHashMap::new, Collectors.toList()));
-            StringBuilder sb = new StringBuilder();
-            List<String> outputFileLines = new ArrayList<>();
-            processRecords(mapOfHomeNoAndSession, outputFilename);
-        }
     }
 
     /**
      * Read input file & process data for output file
-     * @param mapOfHomeNoAndSession
+     *
+     * @param dataList
      * @param outputFilename
-     * @throws IOException
      */
-    private static void processRecords(Map<String, List<Session>> mapOfHomeNoAndSession, String outputFilename) throws IOException {
+    private static void processRecords(List<Session> dataList, String outputFilename) {
         BlockingQueue<String> queue = new LinkedBlockingQueue<>();
-
+        //Sort on homeNo & StartTime
+        Comparator<Session> multiFieldComparator = Comparator.comparing(Session::getHomeNo)
+                .thenComparing(Session::getStartTime);
+        dataList.sort(multiFieldComparator);
+        Map<String, List<Session>> mapOfHomeNoAndSession = dataList.stream()
+                .collect(Collectors.groupingBy(Session::getHomeNo, LinkedHashMap::new, Collectors.toList()));
         try {
-            String header = "HomeNo|Channel|Starttime|Activity|EndTime|Duration";
-            queue.put(header);
             ExecutorService readerPool = Executors.newFixedThreadPool(mapOfHomeNoAndSession.size());
-            readerPool.submit(() -> {
-                mapOfHomeNoAndSession.forEach((home, sessionList) -> {
-                    DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
+            AtomicInteger counter = new AtomicInteger(0);
+            // Submit reader tasks
+            mapOfHomeNoAndSession.forEach((home, sessionList) -> {
+                readerPool.submit(() -> {
                     IntStream.rangeClosed(0, sessionList.size() - 1).forEach(i -> {
                         Session previous = sessionList.get(i);
                         LocalDateTime dateTimePrev = LocalDateTime.parse(previous.getStartTime(), formatter);
@@ -114,6 +116,7 @@ public class Main {
                             LocalDateTime endOfDay = dateTimePrev.toLocalDate().atTime(LocalTime.of(23, 59, 59));
                             Duration gap = Duration.between(dateTimePrev, endOfDay);
                             outputLine = previous.getHomeNo() + "|" + previous.getChannel() + "|" + previous.getStartTime() + "|" + previous.getActivity() + "|" + endOfDay.format(formatter) + "|" + gap.plusSeconds(1).getSeconds();
+
                         } else {
                             Session next = sessionList.get(i + 1);
                             LocalDateTime dateTimeNext = LocalDateTime.parse(next.getStartTime(), formatter);
@@ -121,57 +124,50 @@ public class Main {
                             Duration gap = duration.minusSeconds(1);
                             outputLine = previous.getHomeNo() + "|" + previous.getChannel() + "|" + previous.getStartTime() + "|" + previous.getActivity() + "|" + dateTimePrev.plus(gap).format(formatter) + "|" + duration.getSeconds();
                         }
-                        try {
-                            queue.put(outputLine);
-                        } catch (InterruptedException e) {
-                            throw new RuntimeException(e);
-                        }
+                        counter.incrementAndGet();
+                        putInQueue(queue, outputLine);
                     });
                 });
-                try {
-                    queue.put("EOF");
-                } catch (InterruptedException e) {
-                    throw new RuntimeException(e);
-                }
-
             });
-            try {
-                readerPool.shutdown();
-                readerPool.awaitTermination(5, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                throw new RuntimeException(e);
-            }
-            ExecutorService writerPool = Executors.newFixedThreadPool(mapOfHomeNoAndSession.size());
-            try {
-                //Delete file if created in target
-                Files.deleteIfExists(Paths.get(outputFilename));
+
+            // Shutdown reader pool and wait for completion
+            readerPool.shutdown();
+            readerPool.awaitTermination(5, TimeUnit.SECONDS);
+
+            //Writer to the file
+            List<String> results = new ArrayList<>(queue);
+            //Sort on homeNo & StartTime to write in expected order
+            List<String> sortedList = results.stream()
+                    .sorted(Comparator.comparing((String key) ->
+                            key.split("|")[0]).thenComparing(key -> key.split("|")[2]))
+                    .collect(Collectors.toList());
+
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter(outputFilename, true))) {
+                writer.write(header);
+                writer.newLine();
+                for (String entry : sortedList) {
+                    writer.write(entry);
+                    writer.newLine();
+                }
             } catch (IOException e) {
                 throw new RuntimeException(e);
             }
-            writerPool.submit(() -> {
-                try (BufferedWriter writer = new BufferedWriter(new FileWriter(outputFilename, true))) {
-                    while (true) {
-                        String line = queue.take();
-                        if ("EOF".equals(line)) break;
-                        writer.write(line);
-                        writer.newLine();
-                        writer.flush();
-                    }
-                } catch (IOException | InterruptedException e) {
-                    e.printStackTrace();
-                }
-            });
-            try {
-                writerPool.shutdown();
-                writerPool.awaitTermination(5, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                throw new RuntimeException(e);
-            }
         } catch (Exception e) {
+            logger.error("Exception occurred while processing & populaating output psv file.", e);
+        }
+    }
+
+    /**
+     * Put data in blocking queue
+     *
+     * @param queue
+     * @param outputLine
+     */
+    private static void putInQueue(BlockingQueue<String> queue, String outputLine) {
+        try {
+            queue.put(outputLine);
+        } catch (InterruptedException e) {
             throw new RuntimeException(e);
         }
-        //Just for output file validation purpose added below lines. So no exception handling added here
-        System.out.println("Output psv file generated at:"+ outputFilename + " & File Content as below:");
-        Files.lines(Paths.get(outputFilename)).forEach(s -> System.out.println(s));
     }
 }
