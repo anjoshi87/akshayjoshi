@@ -1,5 +1,6 @@
 package com.kantar.sessionsjob;
 
+import com.kantar.sessionsjob.exception.FileGenerationException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -24,20 +25,14 @@ public class Main {
 
     private static final Logger logger = LogManager.getLogger(Main.class);
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
 
         if (args.length < 2) {
             logger.error("Missing arguments: <input-statements-file> <output-sessions-file>");
             System.exit(1);
         }
-
         // TODO: write application ...
-        try {
-            processSession(args);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-
+        processSession(args);
     }
 
     /**
@@ -45,14 +40,14 @@ public class Main {
      *
      * @param args
      * @throws IOException
+     * @throws InterruptedException
      */
-    public static void processSession(String[] args) throws IOException {
-
-        String inputFilename = args[0];//input-statements-file.psv
-        String outputFilename = args[1];//actual-sessions.psv
-        List<Session> dataList = Collections.synchronizedList(new ArrayList<>()); // Thread-safe list
-        boolean inputDataCollected = true;
-        try (BufferedReader reader = new BufferedReader(new FileReader(inputFilename))) {
+    public static void processSession(String[] args) throws FileGenerationException {
+        try {
+            String inputFilename = args[0];//input-statements-file.psv
+            String outputFilename = args[1];//actual-sessions.psv
+            List<Session> dataList = Collections.synchronizedList(new ArrayList<>()); // Thread-safe list
+            BufferedReader reader = new BufferedReader(new FileReader(inputFilename));
             logger.info("Reading input File & Collecting Data...");
             String line;
             while ((line = reader.readLine()) != null) {
@@ -66,17 +61,15 @@ public class Main {
                 session.setActivity(tokens[3]);
                 dataList.add(session);
             }
-            logger.info("Input File Data Collected.");
+            logger.info("Session Processing Started.");
+            processRecords(dataList, outputFilename);
+            //Just for output file validation purpose added below lines.
+            logger.info("Output psv file generated at:" + outputFilename + " & File Content as below:");
+            Files.lines(Paths.get(outputFilename)).forEach(s -> logger.info(s));
+            logger.info("Session Processing Completed.");
         } catch (Exception e) {
-            logger.error("Exception while reading input file, so further processing failed.");
-            throw e;
+            throw new FileGenerationException("Error while processing Session. Output file generation failed.", e);
         }
-        logger.info("Session Processing Started.");
-        processRecords(dataList, outputFilename);
-        //Just for output file validation purpose added below lines. So no exception handling added here
-        logger.info("Output psv file generated at:" + outputFilename + " & File Content as below:");
-        Files.lines(Paths.get(outputFilename)).forEach(s -> System.out.println(s));
-        logger.info("Session Processing Completed.");
     }
 
     /**
@@ -86,17 +79,17 @@ public class Main {
      * @param outputFilename
      */
     private static void processRecords(List<Session> dataList, String outputFilename) {
-        try {
-            BlockingQueue<String> queue = new LinkedBlockingQueue<>();
-            //Sort on homeNo & StartTime
-            Comparator<Session> multiFieldComparator = Comparator.comparing(Session::getHomeNo)
-                    .thenComparing(Session::getStartTime);
-            dataList.sort(multiFieldComparator);
-            Map<String, List<Session>> mapOfHomeNoAndSession = dataList.stream()
-                    .collect(Collectors.groupingBy(Session::getHomeNo, LinkedHashMap::new, Collectors.toList()));
 
-            ExecutorService readerPool = Executors.newFixedThreadPool(mapOfHomeNoAndSession.size());
-            AtomicInteger counter = new AtomicInteger(0);
+        BlockingQueue<String> queue = new LinkedBlockingQueue<>();
+        //Sort on homeNo & StartTime
+        Comparator<Session> multiFieldComparator = Comparator.comparing(Session::getHomeNo)
+                .thenComparing(Session::getStartTime);
+        dataList.sort(multiFieldComparator);
+        Map<String, List<Session>> mapOfHomeNoAndSession = dataList.stream()
+                .collect(Collectors.groupingBy(Session::getHomeNo, LinkedHashMap::new, Collectors.toList()));
+
+        ExecutorService readerPool = Executors.newFixedThreadPool(mapOfHomeNoAndSession.size());
+        try {
             // Submit reader tasks
             mapOfHomeNoAndSession.forEach((home, sessionList) -> {
                 readerPool.submit(() -> {
@@ -116,38 +109,42 @@ public class Main {
                             Duration gap = duration.minusSeconds(1);
                             outputLine = previous.getHomeNo() + "|" + previous.getChannel() + "|" + previous.getStartTime() + "|" + previous.getActivity() + "|" + dateTimePrev.plus(gap).format(formatter) + "|" + duration.getSeconds();
                         }
-                        counter.incrementAndGet();
                         putInQueue(queue, outputLine);
                     });
                 });
             });
-
+        } finally {
             // Shutdown reader pool and wait for completion
             readerPool.shutdown();
-            readerPool.awaitTermination(5, TimeUnit.SECONDS);
-
-            //Writer to the file
-            List<String> results = new ArrayList<>(queue);
-            //Sort on homeNo & StartTime to write in expected order
-            List<String> sortedList = results.stream()
-                    .sorted(Comparator.comparing((String key) ->
-                            key.split("|")[0]).thenComparing(key -> key.split("|")[2]))
-                    .collect(Collectors.toList());
-
-            try (BufferedWriter writer = new BufferedWriter(new FileWriter(outputFilename, true))) {
-                writer.write(header);
-                writer.newLine();
-                for (String entry : sortedList) {
-                    writer.write(entry);
-                    writer.newLine();
-                }
-            } catch (IOException e) {
+            try {
+                readerPool.awaitTermination(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
                 throw new RuntimeException(e);
             }
-        } catch (Exception e) {
-            logger.error("Exception occurred while processing input file & populating output psv file.", e);
+        }
+
+        deleteFileIfExists(outputFilename);
+
+        //Writer to the file
+        List<String> results = new ArrayList<>(queue);
+        //Sort on homeNo & StartTime to write in expected order
+        List<String> sortedList = results.stream()
+                .sorted(Comparator.comparing((String key) ->
+                        key.split("|")[0]).thenComparing(key -> key.split("|")[2]))
+                .collect(Collectors.toList());
+
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(outputFilename, true))) {
+            writer.write(header);
+            writer.newLine();
+            for (String entry : sortedList) {
+                writer.write(entry);
+                writer.newLine();
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
     }
+
 
     /**
      * Put data in blocking queue
@@ -161,5 +158,20 @@ public class Main {
         } catch (InterruptedException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    /**
+     * Delete File If Exists
+     *
+     * @param outputFilename
+     */
+    private static void deleteFileIfExists(String outputFilename) {
+        try {
+            //Delete file if created in target
+            Files.deleteIfExists(Paths.get(outputFilename));
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
     }
 }
